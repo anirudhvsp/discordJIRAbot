@@ -2,7 +2,7 @@ import discord
 from discord.ext import commands
 import os
 import asyncio
-from multiprocessing import Queue
+import redis
 import json
 from urllib.parse import urlencode
 
@@ -18,7 +18,8 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-def run_bot(user_tokens):
+
+def run_bot(redis_client):
     bot = commands.Bot(command_prefix='!', intents=intents)
 
     # Process 1: Discord bot commands
@@ -37,13 +38,11 @@ def run_bot(user_tokens):
     @bot.command()
     async def myissues(ctx, limit: int = 5):
         """Fetch user's recent Jira issues using OAuth2 token."""
-        # Process 2 should handle OAuth and pass the token here via Queue
-        if ctx.author.id not in user_tokens or "access_token" not in user_tokens[ctx.author.id]:
+        access_token = redis_client.get(f"access_token:{ctx.author.id}")
+        if not access_token:
             await ctx.send("Please authenticate first using !auth")
             return
 
-        access_token = user_tokens[ctx.author.id]["access_token"]
-        # Fetch issues using the access_token (you can call the appropriate API here)
         # Simulate fetching issues:
         issues_data = [{"key": "JRA-123", "fields": {"status": {"name": "Open"}, "summary": "Issue Summary"}}]
 
@@ -69,8 +68,8 @@ def run_bot(user_tokens):
         # Build the authorization URL using urlencode to encode the query parameters
         auth_url = f"{config['oauth2_base_url']}/authorize?" + urlencode(auth_params)
 
-        # Store the state in the shared user_tokens dictionary
-        user_tokens[ctx.author.id] = {"state": state}
+        # Store the state in Redis with user ID
+        redis_client.set(f"state:{state}", str(ctx.author.id))
 
         await ctx.send(f"Click the link to authenticate with Jira: {auth_url}")
 
@@ -78,6 +77,23 @@ def run_bot(user_tokens):
     @bot.event
     async def on_ready():
         print(f'Logged in as {bot.user}')
+
+        # Subscribe to the Redis channel for authentication success messages
+        pubsub = redis_client.pubsub()
+        pubsub.subscribe("auth_channel")
+
+        async def listen_for_auth():
+            while True:
+                message = pubsub.get_message()
+                if message and message['type'] == 'message':
+                    user_id = message['data']
+                    user = await bot.fetch_user(user_id)
+                    if user:
+                        await user.send("You have successfully authenticated with Jira!")
+                await asyncio.sleep(1)
+
+        # Run the auth listener in the background
+        bot.loop.create_task(listen_for_auth())
 
     # Run the bot
     bot.run(config["discord_token"])

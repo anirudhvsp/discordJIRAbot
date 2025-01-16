@@ -1,4 +1,6 @@
 import json
+import redis
+import requests
 from flask import Flask, request, jsonify
 from urllib.parse import urlencode
 import os
@@ -17,6 +19,9 @@ oauth2_base_url = config["oauth2_base_url"]
 # Initialize Flask app
 app = Flask(__name__)
 
+# Initialize Redis connection
+#  = redis.StrictRedis(host='localhost', port=7001, db=0, decode_responses=True)
+
 # Process 2: Web Server for OAuth callback
 @app.route('/')
 def handle_callback():
@@ -27,19 +32,13 @@ def handle_callback():
     if not code or not state:
         return jsonify({"error": "Missing code or state parameter."}), 400
 
-    # Verify the state (you can use the Manager here for state communication)
-    user_id = None
-    for user, data in user_tokens.items():
-        if data["state"] == state:
-            user_id = user
-            break
-
-    if user_id is None:
+    # Verify the state using Redis
+    user_id = redis_client.get(f"state:{state}")
+    if not user_id:
         return jsonify({"error": "Invalid state. Authentication failed."}), 400
 
     try:
         # Exchange the authorization code for an access token
-        import requests
         token_url = f"{oauth2_base_url}/oauth/token"
         data = {
             "client_id": client_id,
@@ -56,8 +55,12 @@ def handle_callback():
         token_data = response.json()
         access_token = token_data.get("access_token")
 
-        # Update the shared user_tokens dictionary with the access token
-        user_tokens[user_id]["access_token"] = access_token
+        # Store the access token in Redis
+        redis_client.set(f"access_token:{user_id}", access_token)
+
+        # Notify the Discord bot to send a DM to the user
+        redis_client.publish("auth_channel", user_id)
+
         return jsonify({"message": "Authentication successful! You can now return to Discord."})
 
     except Exception as e:
@@ -65,7 +68,7 @@ def handle_callback():
 
 
 # This is the function to run the Flask server
-def run_server(user_token):
-    global user_tokens 
-    user_tokens = user_token
-    app.run(host='localhost', port=8080)
+def run_server(rc):
+    global redis_client
+    redis_client = rc
+    app.run(host='localhost', port=7000)
